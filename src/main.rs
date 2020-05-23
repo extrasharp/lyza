@@ -2,6 +2,7 @@
 
 use std::sync::Once;
 use std::fmt;
+use std::default;
 use std::collections::HashMap;
 use std::cell::Cell;
 
@@ -132,12 +133,42 @@ impl OpdefTable {
         OpdefTable(HashMap::new())
     }
 
+
     fn add(&mut self, opd: Opdef) {
         self.0.insert(opd.ch, opd);
     }
 
     fn find(&self, ch: char) -> Option<&Opdef> {
         self.0.get(&ch)
+    }
+
+}
+
+impl default::Default for OpdefTable {
+    fn default() -> Self {
+        let mut ret = OpdefTable::new();
+        ret.add(Opdef {
+            long_name: "bang".to_string(),
+            ch: '*',
+            callback: | ctx: &Context | {
+                clear(ctx, ctx.curr_x, ctx.curr_y);
+            }
+        });
+        ret.add(Opdef {
+            long_name: "east".to_string(),
+            ch: 'E',
+            callback: | ctx: &Context | {
+                move_direction(ctx, 0, 1);
+            }
+        });
+        ret.add(Opdef {
+            long_name: "west".to_string(),
+            ch: 'W',
+            callback: | ctx: &Context | {
+                move_direction(ctx, 0, -1);
+            }
+        });
+        ret
     }
 }
 
@@ -172,7 +203,8 @@ impl Context {
                 let lk = slot.lock.get();
 
                 if !lk && (op != '\0') {
-                    let ref opd = self.opdef_table.find(op).unwrap();
+                    let ref opd = self.opdef_table.find(op)
+                                      .expect("operator not found");
                     (opd.callback)(self);
                 }
 
@@ -218,15 +250,17 @@ fn move_direction(ctx: &Context, dx: i32, dy: i32) {
 //
 
 fn main() {
-    println!("{} {} {} {}"
-           , decode_base64('0')
-           , decode_base64('a')
-           , decode_base64('A')
-           , decode_base64('?'));
-    println!("{} {} {} {}"
-           , encode_base64(10)
-           , encode_base64(26)
-           , encode_base64(56)
-           , encode_base64(63));
-    println!("{}", Field::new(10, 15));
+    let opdt: OpdefTable = Default::default();
+    let field = Field::new(10, 15);
+    let mut ctx = Context::new(opdt, field);
+
+    ctx.field.ref_slot(0, 0).operator.set('*');
+    ctx.field.ref_slot(3, 3).operator.set('E');
+    ctx.field.ref_slot(4, 4).operator.set('W');
+
+    println!("{}", ctx.field);
+    ctx.process();
+    println!("{}", ctx.field);
+    ctx.process();
+    println!("{}", ctx.field);
 }
