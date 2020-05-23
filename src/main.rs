@@ -5,6 +5,7 @@ use std::fmt;
 use std::default;
 use std::collections::HashMap;
 use std::cell::Cell;
+use std::ops;
 
 static ENCODE_TABLE: &[u8] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ?!".as_bytes();
 static mut DECODE_TABLE: [u8; 256] = [0; 256];
@@ -30,6 +31,112 @@ fn encode_base64(int: u8) -> char {
 
 //
 
+#[derive(Copy, Clone)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+impl Point {
+    fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+
+    fn zero() -> Self {
+        Self { x: 0, y: 0 }
+    }
+
+    fn translate(&self, x: i32, y: i32) -> Self {
+        Self {
+            x: self.x + x,
+            y: self.y + y,
+        }
+    }
+}
+
+impl ops::Add for Point {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            x: self.x + other.x,
+            y: self.y + other.y,
+        }
+    }
+}
+
+impl ops::Sub for Point {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Self {
+            x: self.x - other.x,
+            y: self.y - other.y,
+        }
+    }
+}
+
+//
+
+struct Matrix<T> {
+    width: usize,
+    height: usize,
+    data: Vec<Vec<T>>
+}
+
+impl<T: default::Default + Clone> Matrix<T> {
+    fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![vec![Default::default(); width]; height],
+        }
+    }
+
+    fn ref_idx(&self, pt: Point) -> &T {
+        &self.data[pt.y as usize][pt.x as usize]
+    }
+
+    fn in_bounds(&self, pt: Point) -> bool {
+        pt.x >= 0 && pt.y >= 0
+            && pt.x < self.width as i32
+            && pt.y < self.height as i32
+    }
+
+    fn indexed_iter(&self) -> MatrixIterator<T> {
+        MatrixIterator {
+            matr: self,
+            at: Point::new(-1, 0),
+        }
+    }
+}
+
+struct MatrixIterator<'a, T> {
+    matr: &'a Matrix<T>,
+    at: Point,
+}
+
+impl<'a, T: default::Default + Clone> Iterator for MatrixIterator<'a, T> {
+    type Item = (Point, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.at.x += 1;
+
+        if self.at.x >= self.matr.width as i32 {
+            self.at.y += 1;
+            self.at.x = 0;
+        }
+
+        if self.at.y < self.matr.height as i32 {
+            Some((self.at, self.matr.ref_idx(self.at)))
+        } else {
+            None
+        }
+    }
+}
+
+//
+
 #[derive(Clone)]
 struct Slot {
     operator: Cell<char>,
@@ -37,13 +144,6 @@ struct Slot {
 }
 
 impl Slot {
-    fn new() -> Slot {
-        Slot {
-            operator: Cell::new('\0'),
-            lock: Cell::new(false),
-        }
-    }
-
     fn is_clear(&self) -> bool {
         self.operator.get() == '\0'
     }
@@ -54,6 +154,15 @@ impl Slot {
 
     fn clear(&self) {
         self.operator.set('\0');
+    }
+}
+
+impl default::Default for Slot {
+    fn default() -> Self {
+        Self {
+            operator: Cell::new('\0'),
+            lock: Cell::new(false),
+        }
     }
 }
 
@@ -75,44 +184,38 @@ impl fmt::Display for Slot {
 //
 
 struct Field {
-    width: usize,
-    height: usize,
-    slots: Vec<Vec<Slot>>,
+    slots: Matrix<Slot>
 }
 
 impl Field {
-    fn new(width: usize, height: usize) -> Field {
-        Field {
-            width,
-            height,
-            slots: vec![vec![Slot::new(); width]; height],
+    fn new(width: usize, height: usize) -> Self {
+        Self {
+            slots: Matrix::new(width, height)
         }
     }
 
     fn unlock_all(&mut self) {
-        for row in self.slots.iter() {
-            for slot in row {
-                slot.lock.set(false);
-            }
+        for (_pt, slot) in self.slots.indexed_iter() {
+            slot.lock.set(false);
         }
     }
 
-    fn ref_slot(&self, x: usize, y: usize) -> &Slot {
-        &self.slots[x][y]
+    fn ref_slot(&self, pt: Point) -> &Slot {
+        self.slots.ref_idx(pt)
     }
 
-    fn point_in_bounds(&self, x: i32, y: i32) -> bool {
-        x >= 0 && y >=0 && x < self.width as i32 && y < self.height as i32
+    fn point_in_bounds(&self, pt: Point) -> bool {
+        self.slots.in_bounds(pt)
     }
 }
 
 impl fmt::Display for Field {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for row in self.slots.iter() {
-            for slot in row {
-                write!(f, "{}", slot)?;
+        for (pt, slot) in self.slots.indexed_iter() {
+            write!(f, "{}", slot)?;
+            if pt.x + 1 == self.slots.width as i32 {
+                writeln!(f, "")?;
             }
-            writeln!(f, "")?;
         }
         write!(f, "")
     }
@@ -122,7 +225,7 @@ impl fmt::Display for Field {
 
 struct Opdef {
     long_name: String,
-    ch: char,
+    operator: char,
     callback: fn(&Context) -> (),
 }
 
@@ -133,39 +236,68 @@ impl OpdefTable {
         OpdefTable(HashMap::new())
     }
 
-
     fn add(&mut self, opd: Opdef) {
-        self.0.insert(opd.ch, opd);
+        self.0.insert(opd.operator, opd);
     }
 
     fn find(&self, ch: char) -> Option<&Opdef> {
         self.0.get(&ch)
     }
-
 }
+
+static NORTH: Point = Point { x:  0, y: -1 };
+static SOUTH: Point = Point { x:  0, y:  1 };
+static EAST: Point  = Point { x:  1, y:  0 };
+static WEST: Point  = Point { x: -1, y:  0 };
 
 impl default::Default for OpdefTable {
     fn default() -> Self {
         let mut ret = OpdefTable::new();
         ret.add(Opdef {
             long_name: "bang".to_string(),
-            ch: '*',
+            operator: '*',
             callback: | ctx: &Context | {
-                clear(ctx, ctx.curr_x, ctx.curr_y);
+                let ref current_slot = ctx.field.ref_slot(ctx.curr_point);
+                current_slot.clear();
+                current_slot.lock.set(true);
             }
         });
         ret.add(Opdef {
             long_name: "east".to_string(),
-            ch: 'E',
+            operator: 'E',
             callback: | ctx: &Context | {
-                move_direction(ctx, 0, 1);
+                move_direction(ctx, EAST);
             }
         });
         ret.add(Opdef {
             long_name: "west".to_string(),
-            ch: 'W',
+            operator: 'W',
             callback: | ctx: &Context | {
-                move_direction(ctx, 0, -1);
+                move_direction(ctx, WEST);
+            }
+        });
+        ret.add(Opdef {
+            long_name: "north".to_string(),
+            operator: 'N',
+            callback: | ctx: &Context | {
+                move_direction(ctx, NORTH);
+            }
+        });
+        ret.add(Opdef {
+            long_name: "south".to_string(),
+            operator: 'S',
+            callback: | ctx: &Context | {
+                move_direction(ctx, SOUTH);
+            }
+        });
+        ret.add(Opdef {
+            long_name: "halt".to_string(),
+            operator: 'H',
+            callback: | ctx: &Context | {
+                let next = ctx.curr_point + SOUTH;
+                if ctx.field.point_in_bounds(next) {
+                    ctx.field.ref_slot(next).lock.set(true);
+                }
             }
         });
         ret
@@ -177,73 +309,56 @@ impl default::Default for OpdefTable {
 struct Context {
     opdef_table: OpdefTable,
     field: Field,
-    curr_x: usize,
-    curr_y: usize,
+    curr_point: Point,
     frame_ct: u32,
 }
 
 impl Context {
     fn new(opdef_table: OpdefTable, field: Field) -> Context {
-        Context { opdef_table, field
-                , curr_x: 0
-                , curr_y: 0
-                , frame_ct: 0
-                }
+        Context {
+            opdef_table,
+            field,
+            curr_point: Point::zero(),
+            frame_ct: 0,
+        }
     }
 
     fn process(&mut self) {
         self.field.unlock_all();
 
-        for (x, row) in self.field.slots.iter().enumerate() {
-            for (y, slot) in row.iter().enumerate() {
-                self.curr_x = x;
-                self.curr_y = y;
+        for (pt, slot) in self.field.slots.indexed_iter() {
+            self.curr_point = pt;
 
-                let op = slot.operator.get();
-                let lk = slot.lock.get();
+            let op = slot.operator.get();
+            let lk = slot.lock.get();
 
-                if !lk && (op != '\0') {
-                    let ref opd = self.opdef_table.find(op)
-                                      .expect("operator not found");
-                    (opd.callback)(self);
-                }
-
-                self.frame_ct += 1;
+            if !lk && (op != '\0') {
+                let ref opd = self.opdef_table.find(op)
+                                  .expect("operator not found");
+                (opd.callback)(self);
             }
-        }
-    }
 
-    fn current_slot(&self) -> &Slot {
-        self.field.ref_slot(self.curr_x, self.curr_y)
+            self.frame_ct += 1;
+        }
     }
 }
 
 //
 
-fn explode(ctx: &Context, x: usize, y: usize) {
-    let ref slot = ctx.field.ref_slot(x, y);
-    slot.explode();
-    slot.lock.set(true);
-}
+fn move_direction(ctx: &Context, translate: Point) {
+    let next = ctx.curr_point + translate;
+    let ref current_slot = ctx.field.ref_slot(ctx.curr_point);
 
-fn clear(ctx: &Context, x: usize, y: usize) {
-    let ref slot = ctx.field.ref_slot(x, y);
-    slot.clear();
-    slot.lock.set(true);
-}
-
-fn move_direction(ctx: &Context, dx: i32, dy: i32) {
-    let next_x = ctx.curr_x as i32 + dx;
-    let next_y = ctx.curr_y as i32 + dy;
-
-    if !ctx.field.point_in_bounds(next_x, next_y) ||
-       !ctx.field.ref_slot(next_x as usize, next_y as usize).is_clear() {
-        explode(ctx, ctx.curr_x, ctx.curr_y);
+    if !ctx.field.point_in_bounds(next) ||
+       !ctx.field.ref_slot(next).is_clear() {
+        current_slot.explode();
+        current_slot.lock.set(true);
     } else {
-        let next_slot = ctx.field.ref_slot(next_x as usize, next_y as usize);
-        next_slot.operator.set(ctx.current_slot().operator.get());
+        let next_slot = ctx.field.ref_slot(next);
+        next_slot.operator.set(current_slot.operator.get());
         next_slot.lock.set(true);
-        clear(ctx, ctx.curr_x, ctx.curr_y);
+        current_slot.clear();
+        current_slot.lock.set(true);
     }
 }
 
@@ -254,10 +369,16 @@ fn main() {
     let field = Field::new(10, 15);
     let mut ctx = Context::new(opdt, field);
 
-    ctx.field.ref_slot(0, 0).operator.set('*');
-    ctx.field.ref_slot(3, 3).operator.set('E');
-    ctx.field.ref_slot(4, 4).operator.set('W');
+    ctx.field.ref_slot(Point::new(0, 0)).operator.set('*');
+    ctx.field.ref_slot(Point::new(3, 3)).operator.set('E');
+    ctx.field.ref_slot(Point::new(3, 5)).operator.set('E');
+    ctx.field.ref_slot(Point::new(3, 4)).operator.set('W');
+    ctx.field.ref_slot(Point::new(6, 4)).operator.set('H');
 
+    println!("{}", ctx.field);
+    ctx.process();
+    println!("{}", ctx.field);
+    ctx.process();
     println!("{}", ctx.field);
     ctx.process();
     println!("{}", ctx.field);
